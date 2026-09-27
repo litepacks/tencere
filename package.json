@@ -34,7 +34,7 @@
     "bench:softscope": "node /Users/ahmet/projects/shiftmaze/node_modules/softscope/bin/softscope.js -o bench/softscope-report.md bench/softscope-bench.js"
   },
   "dependencies": {
-    "cemalloc": "^0.1.0",
+    "cemalloc": "^0.1.1",
     "daktilo": "^0.1.0",
     "muttafa": "^0.1.0",
     "raptiye": "^0.1.0"
