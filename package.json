@@ -1,6 +1,6 @@
 {
   "name": "tencere",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Modern high-performance KV, cache, and coordination database for embedded and standalone use",
   "type": "module",
   "main": "./src/index.js",
