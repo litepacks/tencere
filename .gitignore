@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Local database directories & WAL storage
+data/
+*.dft
+*.wal
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.cursor/
+.idea/
+.vscode/
+
+# Logs & Temporary files
+*.log
+*.tmp
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Test coverage & profiling outputs
+coverage/
+.nyc_output/
+graphify-out/
+bench/softscope-report.md

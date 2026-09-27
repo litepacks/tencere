@@ -1,0 +1,57 @@
+{
+  "name": "tencere",
+  "version": "0.2.0",
+  "description": "Modern high-performance KV, cache, and coordination database for embedded and standalone use",
+  "type": "module",
+  "main": "./src/index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./sync": "./src/sync/index.js",
+    "./client": "./src/client/index.js"
+  },
+  "files": [
+    "src",
+    "bin",
+    "index.d.ts",
+    "README.md"
+  ],
+  "bin": {
+    "tencere": "bin/tencere.js"
+  },
+  "scripts": {
+    "test": "node --test test/**/*.test.js",
+    "test:unit": "node --test test/unit/*.test.js",
+    "test:integration": "node --test test/integration/*.test.js",
+    "test:coordination": "node --test test/coordination/*.test.js",
+    "test:collections": "node --test test/collections/*.test.js",
+    "test:recovery": "node --test test/recovery/*.test.js",
+    "bench": "node bench/benchmark.js",
+    "bench:timeseries": "node bench/timeseries-bench.js",
+    "bench:softscope": "node /Users/ahmet/projects/shiftmaze/node_modules/softscope/bin/softscope.js -o bench/softscope-report.md bench/softscope-bench.js"
+  },
+  "dependencies": {
+    "cemalloc": "^0.1.0",
+    "daktilo": "^0.1.0",
+    "muttafa": "^0.1.0",
+    "raptiye": "^0.1.0"
+  },
+  "keywords": [
+    "database",
+    "embedded",
+    "key-value",
+    "cache",
+    "coordination",
+    "distributed",
+    "wal",
+    "vector"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "Ahmet",
+  "license": "MIT"
+}
