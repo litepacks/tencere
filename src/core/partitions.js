@@ -32,6 +32,7 @@ export class PartitionManager {
 
     // partitionId -> nodeId
     this.partitionOwners = new Array(this.partitionCount).fill(this.localNodeId);
+    this._mask = (this.partitionCount & (this.partitionCount - 1)) === 0 ? this.partitionCount - 1 : -1;
   }
 
   /**
@@ -41,7 +42,8 @@ export class PartitionManager {
    * @returns {number}
    */
   getPartition(key) {
-    return fnv1a32(key) % this.partitionCount;
+    const h = fnv1a32(key);
+    return this._mask !== -1 ? (h & this._mask) : (h % this.partitionCount);
   }
 
   /**

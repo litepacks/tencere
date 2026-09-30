@@ -23,6 +23,7 @@ import {
   RESP_ERR,
   RESP_EVENT
 } from "./protocol.js";
+import { TencereClient } from "../client/index.js";
 
 export class TencereServer {
   /**
@@ -30,13 +31,16 @@ export class TencereServer {
    * @param {object} [options={}]
    * @param {number} [options.port=7337]
    * @param {string} [options.host='0.0.0.0']
+   * @param {boolean} [options.forwardWrites=false] - Transparently forward write frames to cluster leader
    */
   constructor(db, options = {}) {
     this.db = db;
     this.port = options.port || 7337;
     this.host = options.host || "0.0.0.0";
+    this.forwardWrites = Boolean(options.forwardWrites);
     this.server = null;
     this.connections = new Set();
+    this._forwardClients = new Map();
   }
 
   /**
@@ -86,10 +90,34 @@ export class TencereServer {
             const resp = await this._handleFrame(frame, socketContext);
             socket.write(resp.encode());
           } catch (err) {
+            if (this.forwardWrites && err.code === "ERR_NOT_LEADER") {
+              const leaderAddr = err.leaderAddress || this.db?.cluster?.getLeaderAddress?.();
+              if (leaderAddr && (!frame.payload || !frame.payload._fwd)) {
+                try {
+                  const forwardedResp = await this._forwardFrame(frame, leaderAddr);
+                  socket.write(forwardedResp.encode());
+                  return;
+                } catch (_) {
+                  // Forwarding failed; fall through to returning ERR_NOT_LEADER
+                }
+              }
+            }
+
+            const payload = {
+              error: err.message,
+              code: err.code || "ERR_SERVER"
+            };
+            if (err.code === "ERR_NOT_LEADER") {
+              payload.nodeId = err.nodeId ?? this.db?.cluster?.nodeId ?? null;
+              payload.leaderId = err.leaderId ?? this.db?.cluster?.leaderId ?? null;
+              payload.leaderAddress = err.leaderAddress ?? this.db?.cluster?.getLeaderAddress?.() ?? null;
+              payload.term = err.term ?? this.db?.cluster?.term ?? 1;
+              payload.role = err.role ?? this.db?.cluster?.role ?? "follower";
+            }
             const errFrame = new ProtocolFrame({
               requestId: frame.requestId,
               op: RESP_ERR,
-              payload: { error: err.message, code: err.code || "ERR_SERVER" }
+              payload
             });
             socket.write(errFrame.encode());
           }
@@ -248,6 +276,43 @@ export class TencereServer {
   }
 
   /**
+   * Forwards a frame to the cluster leader node.
+   *
+   * @param {ProtocolFrame} frame
+   * @param {string} leaderAddress
+   * @returns {Promise<ProtocolFrame>}
+   */
+  async _forwardFrame(frame, leaderAddress) {
+    let client = this._forwardClients.get(leaderAddress);
+    if (!client || !client.connected) {
+      client = await TencereClient.connect(leaderAddress, { autoRedirect: false });
+      this._forwardClients.set(leaderAddress, client);
+
+      client.socket?.on("close", () => {
+        if (this._forwardClients.get(leaderAddress) === client) {
+          this._forwardClients.delete(leaderAddress);
+        }
+      });
+      client.socket?.on("error", () => {
+        if (this._forwardClients.get(leaderAddress) === client) {
+          this._forwardClients.delete(leaderAddress);
+        }
+      });
+    }
+
+    const fwdPayload = (frame.payload && typeof frame.payload === "object")
+      ? { ...frame.payload, _fwd: true }
+      : frame.payload;
+
+    const result = await client._send(frame.op, fwdPayload);
+    return new ProtocolFrame({
+      requestId: frame.requestId,
+      op: RESP_OK,
+      payload: result
+    });
+  }
+
+  /**
    * Stops the server and closes all active client sockets.
    *
    * @returns {Promise<void>}
@@ -257,6 +322,11 @@ export class TencereServer {
       socket.destroy();
     }
     this.connections.clear();
+
+    for (const client of this._forwardClients.values()) {
+      await client.close().catch(() => {});
+    }
+    this._forwardClients.clear();
 
     if (this.server) {
       await new Promise((resolve) => this.server.close(resolve));
@@ -268,3 +338,4 @@ export class TencereServer {
     return this.stop();
   }
 }
+

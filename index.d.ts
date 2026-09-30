@@ -2,6 +2,43 @@
  * TypeScript definitions for Tencere database.
  */
 
+export interface SystemLimits {
+  BINARY: {
+    MAX_KEY_BYTES: number;
+    MAX_EXTRA_BYTES: number;
+    MAX_VALUE_BYTES: number;
+    MAX_PARTITIONS: number;
+    MAX_TTL_MS: number;
+    MAX_VERSION: bigint;
+  };
+  CLUSTER: {
+    MIN_NODES: number;
+    RECOMMENDED_MAX_NODES: number;
+    DEFAULT_HEARTBEAT_MS: number;
+    DEFAULT_ELECTION_MIN_MS: number;
+    DEFAULT_ELECTION_MAX_MS: number;
+    MAX_RAFT_BATCH_BYTES: number;
+    MAX_INFLIGHT_BATCHES: number;
+  };
+  TIMESERIES: {
+    DEFAULT_MAX_SERIES: number;
+    DEFAULT_MAX_TAGS: number;
+    MAX_TAG_KEY_LENGTH: number;
+    MAX_TAG_VALUE_LENGTH: number;
+  };
+  COORDINATION: {
+    MAX_TIMEOUT_MS: number;
+    DEFAULT_LOCK_TTL_MS: number;
+    DEFAULT_SEMAPHORE_CAPACITY: number;
+  };
+  VECTOR: {
+    RECOMMENDED_MAX_DIMENSIONS: number;
+    DEFAULT_TOP_K: number;
+  };
+}
+
+export const LIMITS: SystemLimits;
+
 export interface TencereOptions {
   durability?: "strict" | "batch" | "async";
   batchWindowMs?: number;
@@ -11,10 +48,119 @@ export interface TencereOptions {
 }
 
 export interface ClusterConfig {
-  nodeId: string;
-  peers?: string[];
-  heartbeatMs?: number;
-  electionTimeoutMs?: number;
+  nodeId: string | number;
+  peers?: (string | number)[];
+  port?: number;
+  host?: string;
+  peerAddresses?: Record<string | number, string>;
+  election?: {
+    minTimeout?: number;
+    maxTimeout?: number;
+  };
+  heartbeatInterval?: number;
+  network?: any;
+}
+
+export interface ClusterMetrics {
+  enabled: boolean;
+  nodeId?: number;
+  role?: string;
+  term?: number;
+  leaderId?: number | null;
+  commitIndex?: number;
+  lastApplied?: number;
+  lastLogIndex?: number;
+  replicationLag?: number;
+  elections?: number;
+  leaderChanges?: number;
+  submitted?: number;
+  committed?: number;
+  applied?: number;
+  bytes?: {
+    wireBytes: number;
+    payloadBytes: number;
+    protocolOverheadBytes: number;
+    copiedBytes: number;
+  };
+  [key: string]: any;
+}
+
+export interface ClusterNodeHealth {
+  id?: number | null;
+  nodeId?: number | null;
+  role: string;
+  address?: string | null;
+  status: "ONLINE" | "UNREACHABLE";
+  latencyMs?: number | null;
+  isLeader: boolean;
+  error?: string;
+}
+
+export interface ClusterQuorumInfo {
+  required: number;
+  reachable: number;
+  total: number;
+  hasQuorum: boolean;
+}
+
+export interface ClusterHealth {
+  enabled: boolean;
+  status: "HEALTHY" | "DEGRADED" | "QUORUM_LOST" | "STANDALONE";
+  readiness: boolean;
+  liveness: boolean;
+  nodeId?: number;
+  leader?: {
+    id: number | null;
+    address: string | null;
+    isSelf: boolean;
+  };
+  leaderAddress?: string | null;
+  term?: number;
+  quorum?: ClusterQuorumInfo;
+  nodes?: ClusterNodeHealth[];
+  partitions?: {
+    total: number;
+    balanced: boolean;
+  };
+  metrics?: ClusterMetrics;
+  message?: string;
+  keys?: number;
+  operations?: number;
+  [key: string]: any;
+}
+
+export interface ClusterStatus {
+  enabled: boolean;
+  nodeId?: number;
+  leaderId?: number | null;
+  leaderAddress?: string | null;
+  term?: number;
+  isLeader?: boolean;
+  role?: string;
+  peers?: number[];
+  peerAddresses?: Record<string | number, string>;
+  metrics?: ClusterMetrics;
+  [key: string]: any;
+}
+
+export class ClusterManager {
+  readonly enabled: boolean;
+  readonly nodeId: number;
+  readonly peers: number[];
+  readonly leaderId: number | null;
+  readonly role: string;
+  readonly term: number;
+  isLeader(): boolean;
+  waitForLeader(timeoutMs?: number): Promise<number | null>;
+  getLeaderAddress(): string | null;
+  status(): ClusterStatus;
+  metrics(): ClusterMetrics;
+  health(options?: { pingPeers?: boolean; timeoutMs?: number }): Promise<ClusterHealth>;
+  replicate(op: any, options?: { ack?: "local" | "quorum" | "all"; timeoutMs?: number }): Promise<any>;
+  stop(): Promise<void>;
+  on(event: string, listener: (...args: any[]) => void): this;
+  off(event: string, listener: (...args: any[]) => void): this;
+  emit(event: string, ...args: any[]): boolean;
 }
 
 export interface HistoryOptions {
@@ -403,6 +549,8 @@ export class AgentMemory {
 export class Tencere {
   constructor(engine: any, options?: TencereOptions);
   static open(dataDir?: string | TencereOptions, options?: TencereOptions): Promise<Tencere>;
+  get limits(): SystemLimits;
+  static get limits(): SystemLimits;
 
   get<T = any>(key: string, options?: GetOptions): Promise<T | undefined>;
   set(key: string, value: any, options?: SetOptions): Promise<void>;
@@ -449,8 +597,11 @@ export class Tencere {
 
   semantic: SemanticCache;
   memory: AgentMemory;
+  cluster: ClusterManager | null;
 
   stats(): TencereStats;
+  health(options?: { pingPeers?: boolean; timeoutMs?: number }): Promise<ClusterHealth>;
+  metrics(): ClusterMetrics;
   checkpoint(): Promise<void>;
   close(): Promise<void>;
 }
@@ -471,10 +622,62 @@ export class TencereSync {
   close(): void;
 }
 
-export class TencereClient {
-  static connect(address: string, options?: any): Promise<TencereClient>;
+export interface TencereClientOptions {
+  autoRedirect?: boolean;
+}
+
+export interface TencereClusterClientOptions {
+  readPreference?: "leader" | "nearest" | "follower";
+  maxRetries?: number;
+  retryDelayMs?: number;
+  refreshIntervalMs?: number;
+}
+
+export class TencereClusterClient extends EventEmitter {
+  constructor(seedAddresses: string | string[], options?: TencereClusterClientOptions);
+  connect(): Promise<this>;
+  discoverTopology(): Promise<{ leader: string | null; nodes: string[] }>;
+  get<T = any>(key: string, options?: any): Promise<T | undefined>;
+  set(key: string, value: any, options?: SetOptions): Promise<any>;
+  delete(key: string): Promise<boolean>;
+  has(key: string): Promise<boolean>;
+  increment(key: string, delta?: number): Promise<number>;
+  patch(key: string, patchSpec: PatchSpec): Promise<any>;
+  keys(prefix?: string): Promise<string[]>;
+  stats(): Promise<any>;
+  clear(): Promise<boolean>;
+  ttl(key: string): Promise<number>;
+  getMany<T = any>(keys: string[]): Promise<(T | undefined)[]>;
+  setMany(entries: [string, any][]): Promise<boolean>;
+  unlock(key: string): Promise<boolean>;
+  checkpoint(): Promise<boolean>;
   ping(): Promise<string>;
-  get<T = any>(key: string): Promise<T | undefined>;
+  exec(target: string, name: string, method: string, args?: any[]): Promise<any>;
+  watch(pattern?: string, handler?: (event: any) => void): Promise<any>;
+  unwatch(): Promise<any>;
+  pipeline(): any;
+  getLeaderAddress(): string | null;
+  getNodes(): string[];
+  status(): { leaderAddress: string | null; nodes: string[]; readPreference: string; connectedClients: number };
+  health(options?: { timeoutMs?: number }): Promise<ClusterHealth>;
+  close(): Promise<void>;
+}
+
+export class TencereClient {
+  static connect(address: string, options?: TencereClientOptions): Promise<TencereClient>;
+  static cluster(seedAddresses: string | string[], options?: TencereClusterClientOptions): Promise<TencereClusterClient>;
+  ping(): Promise<string>;
+  health(): Promise<{
+    status: "HEALTHY" | "OFFLINE";
+    readiness: boolean;
+    liveness: boolean;
+    latencyMs: number | null;
+    address: string;
+    cluster: any;
+    stats?: any;
+    error?: string;
+  }>;
+  get<T = any>(key: string, options?: any): Promise<T | undefined>;
   set(key: string, value: any, options?: SetOptions): Promise<boolean>;
   delete(key: string): Promise<boolean>;
   has(key: string): Promise<boolean>;
@@ -482,15 +685,79 @@ export class TencereClient {
   patch(key: string, patchSpec: PatchSpec): Promise<any>;
   keys(prefix?: string): Promise<string[]>;
   stats(): Promise<any>;
-  watch(pattern?: string): WatchStream;
+  clear(): Promise<boolean>;
+  ttl(key: string): Promise<number>;
+  getMany<T = any>(keys: string[]): Promise<(T | undefined)[]>;
+  setMany(entries: [string, any][]): Promise<boolean>;
+  unlock(key: string): Promise<boolean>;
+  checkpoint(): Promise<boolean>;
+  watch(pattern?: string, handler?: (event: any) => void): Promise<any>;
+  unwatch(): Promise<any>;
+  pipeline(): any;
   close(): Promise<void>;
 }
 
 export class TencereServer {
-  constructor(options?: { port?: number; host?: string; dataDir?: string; durability?: string });
+  constructor(db: Tencere, options?: { port?: number; host?: string; forwardWrites?: boolean });
   start(): Promise<void>;
   stop(): Promise<void>;
 }
 
+export class PartitionableNetwork {
+  isolatedNodes: Set<number>;
+  partitionPairs: Set<string>;
+  isolate(nodeId: number | string): void;
+  heal(nodeId?: number | string): void;
+  partition(groupA: (number | string)[], groupB: (number | string)[]): void;
+  deliver(from: number | string, to: number | string, buffers: any): void;
+}
+
+export interface TestClusterOptions {
+  nodes?: number;
+  tcp?: boolean;
+  basePort?: number;
+  host?: string;
+  dataDir?: string | null;
+  forwardWrites?: boolean;
+  clusterOptions?: any;
+}
+
+export class TestCluster {
+  constructor(options?: TestClusterOptions);
+  nodeCount: number;
+  isTcp: boolean;
+  basePort: number;
+  host: string;
+  baseDataDir: string | null;
+  forwardWrites: boolean;
+  clusterOptions: any;
+  network: PartitionableNetwork;
+  nodes: Map<number, Tencere>;
+  servers: Map<number, TencereServer>;
+  ports: Map<number, number>;
+  peerAddresses: Record<number, string>;
+  leader: Tencere | null;
+  followers: Tencere[];
+  addresses: string[];
+
+  start(): Promise<this>;
+  node(id: number | string): Tencere | null;
+  waitForLeader(timeoutMs?: number): Promise<Tencere>;
+  isolate(nodeOrId: Tencere | number | string): void;
+  heal(nodeOrId?: Tencere | number | string): void;
+  partition(groupA: (number | string)[], groupB: (number | string)[]): void;
+  stopNode(nodeOrId: Tencere | number | string): Promise<void>;
+  startNode(id: number | string): Promise<Tencere>;
+  restartNode(nodeOrId: Tencere | number | string): Promise<Tencere>;
+  client(options?: any): Promise<TencereClusterClient | any>;
+  health(options?: { pingPeers?: boolean; timeoutMs?: number }): Promise<ClusterHealth>;
+  metrics(): ClusterMetrics;
+  destroy(): Promise<void>;
+  close(): Promise<void>;
+}
+
+export function createTestCluster(options?: TestClusterOptions): Promise<TestCluster>;
+
 export * from "./src/errors.js";
 export default Tencere;
+

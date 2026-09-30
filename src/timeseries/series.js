@@ -3,6 +3,7 @@
  */
 
 import { TagLimitExceededError, SeriesCardinalityExceededError } from "../errors.js";
+import { LIMITS } from "../core/limits.js";
 
 /**
  * FNV-1a 64-bit hash implementation.
@@ -25,10 +26,10 @@ export class SeriesRegistry {
   /**
    * @param {string} collection
    * @param {object} [options={}]
-   * @param {number} [options.maxTags=8]
-   * @param {number} [options.maxTagKeyLength=64]
-   * @param {number} [options.maxTagValueLength=128]
-   * @param {number} [options.maxSeries=100000]
+   * @param {number} [options.maxTags]
+   * @param {number} [options.maxTagKeyLength]
+   * @param {number} [options.maxTagValueLength]
+   * @param {number} [options.maxSeries]
    * @param {string[]} [options.indexed]
    */
   constructor(collection, options = {}) {
@@ -36,10 +37,11 @@ export class SeriesRegistry {
     const limits = options.limits || {};
     const tagOpts = options.tags || {};
 
-    this.maxTags = limits.maxTags !== undefined ? limits.maxTags : (tagOpts.maxTags || 8);
-    this.maxTagKeyLength = limits.maxTagKeyLength !== undefined ? limits.maxTagKeyLength : 64;
-    this.maxTagValueLength = limits.maxTagValueLength !== undefined ? limits.maxTagValueLength : 128;
-    this.maxSeries = limits.maxSeries !== undefined ? limits.maxSeries : 100000;
+    const tsLimits = LIMITS.TIMESERIES;
+    this.maxTags = limits.maxTags !== undefined ? limits.maxTags : (tagOpts.maxTags || tsLimits.DEFAULT_MAX_TAGS);
+    this.maxTagKeyLength = limits.maxTagKeyLength !== undefined ? limits.maxTagKeyLength : tsLimits.MAX_TAG_KEY_LENGTH;
+    this.maxTagValueLength = limits.maxTagValueLength !== undefined ? limits.maxTagValueLength : tsLimits.MAX_TAG_VALUE_LENGTH;
+    this.maxSeries = limits.maxSeries !== undefined ? limits.maxSeries : tsLimits.DEFAULT_MAX_SERIES;
     this.indexed = Array.isArray(tagOpts.indexed) ? new Set(tagOpts.indexed) : null;
 
     // seriesId -> { seriesId, canonicalTags, tags }

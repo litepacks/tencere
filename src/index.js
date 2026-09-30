@@ -30,10 +30,12 @@ import { ClusterManager } from "./cluster/cluster.js";
 
 import { calculateStateHash, calculatePartitionHash } from "./diagnostics/state-hash.js";
 import { verifyInvariants } from "./diagnostics/invariants.js";
+import { LIMITS } from "./core/limits.js";
 
+export { LIMITS } from "./core/limits.js";
 export * from "./errors.js";
 export { TencereSync } from "./sync/index.js";
-export { TencereClient } from "./client/index.js";
+export { TencereClient, TencereClusterClient, ClusterClientPipeline } from "./client/index.js";
 export { TencereServer } from "./core/server.js";
 export { HistoryManager } from "./history/index.js";
 export { HistoricalView } from "./history/view.js";
@@ -42,6 +44,7 @@ export { HistoryConfig } from "./history/config.js";
 export { TimeSeriesCollection, TimeSeriesQuery };
 export { calculateStateHash, calculatePartitionHash, verifyInvariants };
 export { FaultInjectionError, FaultInjector } from "./core/fault-injection.js";
+export { createTestCluster, TestCluster, PartitionableNetwork } from "./testing/test-cluster.js";
 
 export class Tencere {
   /**
@@ -81,6 +84,20 @@ export class Tencere {
       },
       fault: this._engine._faults
     };
+  }
+
+  /**
+   * System limits, constraints, and protocol thresholds.
+   */
+  get limits() {
+    return LIMITS;
+  }
+
+  /**
+   * System limits, constraints, and protocol thresholds.
+   */
+  static get limits() {
+    return LIMITS;
   }
 
   /**
@@ -145,8 +162,8 @@ export class Tencere {
     return this._engine.increment(key, delta !== undefined ? -delta : -1, options);
   }
 
-  async patch(key, patchSpec) {
-    return this._engine.patch(key, patchSpec);
+  async patch(key, patchSpec, options) {
+    return this._engine.patch(key, patchSpec, options);
   }
 
   async update(key, updater, options) {
@@ -284,12 +301,57 @@ export class Tencere {
 
   // ---------------- Observability & Lifecycle ----------------
 
+  /**
+   * Cluster manager if cluster mode is enabled, or null.
+   * @type {ClusterManager|null}
+   */
+  get cluster() {
+    return this._cluster;
+  }
+
   stats() {
     const s = this._engine.stats();
     if (this._cluster) {
       s.cluster = this._cluster.status();
     }
     return s;
+  }
+
+  /**
+   * Evaluates comprehensive health status for embedded or cluster engine.
+   *
+   * @param {object} [options={}]
+   * @returns {Promise<object>}
+   */
+  async health(options = {}) {
+    if (this._cluster) {
+      return this._cluster.health(options);
+    }
+    const s = this.stats();
+    return {
+      enabled: false,
+      status: "STANDALONE",
+      readiness: !this._engine.isClosed,
+      liveness: !this._engine.isClosed,
+      keys: s.keys,
+      operations: s.operations
+    };
+  }
+
+  /**
+   * Telemetry metrics for cluster or standalone engine.
+   *
+   * @returns {object}
+   */
+  metrics() {
+    if (this._cluster) {
+      return this._cluster.metrics();
+    }
+    return {
+      enabled: false,
+      status: "STANDALONE",
+      stats: this.stats()
+    };
   }
 
   async checkpoint() {

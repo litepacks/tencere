@@ -22,11 +22,14 @@ import {
   RESP_ERR,
   RESP_EVENT
 } from "../core/protocol.js";
+import { NotLeaderError } from "../errors.js";
+import { TencereClusterClient, ClusterClientPipeline } from "./cluster-client.js";
 
 export class TencereClient {
   /**
    * @param {string} address - e.g. '127.0.0.1:7337' or 'localhost:7337'
    * @param {object} [options={}]
+   * @param {boolean} [options.autoRedirect=false] - Auto-redirect write operations if follower returns ERR_NOT_LEADER
    */
   constructor(address, options = {}) {
     const [host, port] = address.split(":");
@@ -43,7 +46,7 @@ export class TencereClient {
   }
 
   /**
-   * Connects to Tencere server.
+   * Connects to a standalone Tencere server.
    *
    * @param {string} address
    * @param {object} [options={}]
@@ -53,6 +56,20 @@ export class TencereClient {
     const client = new TencereClient(address, options);
     await client._connect();
     return client;
+  }
+
+  /**
+   * Connects to a Tencere cluster via seed addresses with automatic discovery,
+   * write routing to leader, and failover support.
+   *
+   * @param {string|string[]} seedAddresses
+   * @param {object} [options={}]
+   * @returns {Promise<TencereClusterClient>}
+   */
+  static async cluster(seedAddresses, options = {}) {
+    const clusterClient = new TencereClusterClient(seedAddresses, options);
+    await clusterClient.connect();
+    return clusterClient;
   }
 
   async _connect() {
@@ -75,8 +92,22 @@ export class TencereClient {
           if (frame.op === RESP_OK) {
             handler.resolve(frame.payload);
           } else {
-            const msg = frame.payload?.error || "Remote server error";
-            handler.reject(new Error(msg));
+            const p = frame.payload || {};
+            const msg = p.error || "Remote server error";
+            let err;
+            if (p.code === "ERR_NOT_LEADER") {
+              err = new NotLeaderError(
+                p.nodeId,
+                p.leaderId,
+                p.role,
+                p.term,
+                p.leaderAddress
+              );
+            } else {
+              err = new Error(msg);
+              if (p.code) err.code = p.code;
+            }
+            handler.reject(err);
           }
         }
       });
@@ -120,7 +151,20 @@ export class TencereClient {
     }
   }
 
-  _send(op, payload) {
+  async _redirectTo(newAddress) {
+    const [host, port] = newAddress.split(":");
+    if (this.socket) {
+      this.socket.removeAllListeners();
+      this.socket.destroy();
+      this.socket = null;
+    }
+    this.connected = false;
+    this.host = host || "127.0.0.1";
+    this.port = Number(port) || 7337;
+    await this._connect();
+  }
+
+  async _send(op, payload, retried = false) {
     if (!this.connected) {
       throw new Error("TencereClient is not connected");
     }
@@ -128,14 +172,22 @@ export class TencereClient {
     const frame = new ProtocolFrame({ requestId, op, payload });
     const encoded = frame.encode();
 
-    return new Promise((resolve, reject) => {
-      this.pending.set(requestId, { resolve, reject });
-      this._writeQueue.push(encoded);
-      if (!this._scheduledFlush) {
-        this._scheduledFlush = true;
-        queueMicrotask(() => this._flushWrites());
+    try {
+      return await new Promise((resolve, reject) => {
+        this.pending.set(requestId, { resolve, reject });
+        this._writeQueue.push(encoded);
+        if (!this._scheduledFlush) {
+          this._scheduledFlush = true;
+          queueMicrotask(() => this._flushWrites());
+        }
+      });
+    } catch (err) {
+      if (!retried && this.options.autoRedirect && err.code === "ERR_NOT_LEADER" && err.leaderAddress) {
+        await this._redirectTo(err.leaderAddress);
+        return this._send(op, payload, true);
       }
-    });
+      throw err;
+    }
   }
 
   /**
@@ -149,6 +201,40 @@ export class TencereClient {
 
   async ping() {
     return this._send(OP_PING, null);
+  }
+
+  /**
+   * Checks health and latency of the connected node.
+   *
+   * @returns {Promise<object>}
+   */
+  async health() {
+    try {
+      const start = Date.now();
+      await this.ping();
+      const latencyMs = Date.now() - start;
+      const stats = await this.stats();
+      const cl = stats?.cluster;
+      return {
+        status: "HEALTHY",
+        readiness: true,
+        liveness: true,
+        latencyMs,
+        address: `${this.host}:${this.port}`,
+        quorum: cl?.quorum || null,
+        cluster: cl || null,
+        stats
+      };
+    } catch (err) {
+      return {
+        status: "OFFLINE",
+        readiness: false,
+        liveness: false,
+        latencyMs: null,
+        address: `${this.host}:${this.port}`,
+        error: err.message
+      };
+    }
   }
 
   async get(key, options) {
@@ -289,3 +375,6 @@ export class ClientPipeline {
     return Promise.all(promises);
   }
 }
+
+export { TencereClusterClient, ClusterClientPipeline };
+

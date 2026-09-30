@@ -45,7 +45,8 @@ import {
   KeyNotFoundError,
   HistoryDisabledError,
   HistoryUnavailableError,
-  ReadOnlyDatabaseError
+  ReadOnlyDatabaseError,
+  NotLeaderError
 } from "../errors.js";
 import { HistoryManager } from "../history/index.js";
 import { HistoricalView } from "../history/view.js";
@@ -175,6 +176,12 @@ export class TencereEngine {
    */
   _applyOperation(op, emit = true, sequence = null) {
     this._faults.trigger("before-state-apply");
+    if (op.version && BigInt(op.version) > this._sequenceCounter) {
+      this._sequenceCounter = BigInt(op.version);
+    }
+    if (sequence && BigInt(sequence) > this._sequenceCounter) {
+      this._sequenceCounter = BigInt(sequence);
+    }
     const hasListeners = emit && this.events.listenerCount("change") > 0;
 
     switch (op.op) {
@@ -476,16 +483,18 @@ export class TencereEngine {
     if (this.cluster && this.cluster.enabled && this.cluster._peers?.length > 0) {
       if (!this.cluster.isLeader()) {
         const status = this.cluster.status();
-        throw new Error(`[Cluster Fencing] Node ${this.cluster._nodeId} is not leader (role: ${status.role}, term: ${status.term})`);
+        const leaderAddress = typeof this.cluster.getLeaderAddress === "function" ? this.cluster.getLeaderAddress() : null;
+        throw new NotLeaderError(this.cluster._nodeId, this.cluster.leaderId, status.role, status.term, leaderAddress);
       }
     }
   }
 
-  async _replicateCluster(op, options = {}) {
+  _replicateCluster(op, options = {}) {
     if (this.cluster && this.cluster.enabled && this.cluster._peers?.length > 0) {
       this._checkClusterLeader();
-      await this.cluster.replicate(op, { ack: options.ack, timeoutMs: options.timeoutMs });
+      return this.cluster.replicate(op, { ack: options.ack, timeoutMs: options.timeoutMs });
     }
+    return null;
   }
 
   async _withKeyLock(key, fn) {
@@ -505,10 +514,23 @@ export class TencereEngine {
       } catch (_) {}
     }
 
-    const nextHeldKeys = new Set(currentHeldKeys);
-    nextHeldKeys.add(key);
+    if (currentHeldKeys) {
+      currentHeldKeys.add(key);
+      try {
+        return await fn();
+      } finally {
+        currentHeldKeys.delete(key);
+        if (this._keyLocks.get(key) === promise) {
+          this._keyLocks.delete(key);
+        }
+        resolve();
+      }
+    }
 
-    return this._lockContext.run(nextHeldKeys, async () => {
+    const heldKeys = new Set();
+    heldKeys.add(key);
+
+    return this._lockContext.run(heldKeys, async () => {
       try {
         return await fn();
       } finally {
@@ -634,7 +656,8 @@ export class TencereEngine {
         payloadSize = logRes.size;
       }
 
-      await this._replicateCluster(op, options);
+      const rep = this._replicateCluster(op, options);
+      if (rep) await rep;
 
       if (shouldTrack) {
         this.historyManager.record({
@@ -859,7 +882,8 @@ export class TencereEngine {
         payloadSize = logRes.size;
       }
 
-      await this._replicateCluster(op, options);
+      const rep = this._replicateCluster(op, options);
+      if (rep) await rep;
 
       if (shouldTrack) {
         this.historyManager.record({
@@ -1039,7 +1063,8 @@ export class TencereEngine {
         payloadSize = logRes.size;
       }
 
-      await this._replicateCluster(op, options);
+      const rep = this._replicateCluster(op, options);
+      if (rep) await rep;
 
       if (shouldTrack) {
         this.historyManager.record({
@@ -1080,13 +1105,14 @@ export class TencereEngine {
    * @param {object} patchSpec
    * @returns {Promise<any>} patched document
    */
-  async patch(key, patchSpec) {
+  async patch(key, patchSpec, options = {}) {
     if (this.isClosed) throw new DatabaseClosedError();
+    this._checkClusterLeader();
 
     const shouldTrack = this._historyEnabled && this.historyManager.shouldTrack(key);
 
     // Fast-path: uncontended in-memory operation
-    if (!this.daktilo && !shouldTrack && !this._keyLocks.has(key)) {
+    if (!this.daktilo && !shouldTrack && !this._keyLocks.has(key) && !this.cluster) {
       if (this.expiry.isExpired(key)) {
         this._handleExpiredKey(key);
       }
@@ -1131,20 +1157,24 @@ export class TencereEngine {
       const timestamp = Date.now();
       let payloadSize = 0;
 
+      const partition = this.partitions.getPartition(key);
+      const op = new Operation({
+        op: OP_PATCH,
+        partition,
+        key,
+        value: patchSpec,
+        version: nextVersion,
+        timestamp
+      });
+
       if (this.daktilo) {
-        const partition = this.partitions.getPartition(key);
-        const op = new Operation({
-          op: OP_PATCH,
-          partition,
-          key,
-          value: patchSpec,
-          version: nextVersion,
-          timestamp
-        });
         const logRes = await this._logOperation(op);
         seq = logRes.seq;
         payloadSize = logRes.size;
       }
+
+      const rep = this._replicateCluster(op, options);
+      if (rep) await rep;
 
       if (shouldTrack) {
         this.historyManager.record({
@@ -1219,7 +1249,8 @@ export class TencereEngine {
         payloadSize = logRes.size;
       }
 
-      await this._replicateCluster(op, options);
+      const rep = this._replicateCluster(op, options);
+      if (rep) await rep;
 
       if (this._historyEnabled) {
         this.historyManager.record({

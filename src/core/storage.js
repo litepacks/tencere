@@ -50,6 +50,8 @@ export class StorageEntry {
       this.updatedAt = key.updatedAt || Date.now();
       this.allocated = key.allocated || false;
       this.rawAllocatedBuffer = key.rawAllocatedBuffer || null;
+      this._primitive = undefined;
+      this._isPrimitive = false;
       return;
     }
     this.key = key;
@@ -58,10 +60,20 @@ export class StorageEntry {
     this.updatedAt = updatedAt;
     this.allocated = allocated;
     this.rawAllocatedBuffer = null;
+    this._primitive = undefined;
+    this._isPrimitive = false;
   }
 
   get value() {
-    return BinaryCodec.decode(this.bytes);
+    if (this._isPrimitive) {
+      return this._primitive;
+    }
+    const val = BinaryCodec.decode(this.bytes);
+    if (val === null || typeof val !== "object") {
+      this._primitive = val;
+      this._isPrimitive = true;
+    }
+    return val;
   }
 
   get size() {
@@ -140,6 +152,10 @@ export class StorageEngine {
 
     const entry = new StorageEntry(key, bytes, version, Date.now(), allocated);
     entry.rawAllocatedBuffer = rawAllocatedBuffer;
+    if (value === null || typeof value !== "object") {
+      entry._primitive = value;
+      entry._isPrimitive = true;
+    }
 
     this.entries.set(key, entry);
     this.totalBytes += size;

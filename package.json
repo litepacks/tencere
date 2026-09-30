@@ -1,6 +1,6 @@
 {
   "name": "tencere",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Modern high-performance KV, cache, and coordination database for embedded and standalone use",
   "type": "module",
   "main": "./src/index.js",
@@ -11,11 +11,13 @@
       "default": "./src/index.js"
     },
     "./sync": "./src/sync/index.js",
-    "./client": "./src/client/index.js"
+    "./client": "./src/client/index.js",
+    "./testing": "./src/testing/test-cluster.js"
   },
   "files": [
     "src",
     "bin",
+    "skills",
     "index.d.ts",
     "README.md"
   ],
@@ -23,6 +25,7 @@
     "tencere": "bin/tencere.js"
   },
   "scripts": {
+    "skill:install": "node bin/tencere.js skill install",
     "test": "node --test test/**/*.test.js",
     "test:unit": "node --test test/unit/*.test.js",
     "test:integration": "node --test test/integration/*.test.js",
@@ -35,7 +38,7 @@
   },
   "dependencies": {
     "cemalloc": "^0.1.1",
-    "daktilo": "^0.1.0",
+    "daktilo": "^0.1.1",
     "muttafa": "^0.1.0",
     "raptiye": "^0.1.0"
   },

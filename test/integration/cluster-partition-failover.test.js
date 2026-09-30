@@ -64,9 +64,9 @@ test("Cluster Resilience - Network partition, leader failover, fencing, and catc
   try {
     // 1. Wait for initial leader
     const initialLeaderId =
-      (await node1._cluster.waitForLeader(1500)) ||
-      (await node2._cluster.waitForLeader(1500)) ||
-      (await node3._cluster.waitForLeader(1500));
+      (await node1.cluster.waitForLeader(1500)) ||
+      (await node2.cluster.waitForLeader(1500)) ||
+      (await node3.cluster.waitForLeader(1500));
 
     assert.ok(initialLeaderId, "Initial cluster leader must be elected");
     const initialLeader = nodes.get(initialLeaderId);
@@ -99,8 +99,8 @@ test("Cluster Resilience - Network partition, leader failover, fencing, and catc
     const startWait = Date.now();
     while (Date.now() - startWait < 2000) {
       for (const sn of survivingNodes) {
-        if (sn._cluster.isLeader()) {
-          newLeaderId = sn._cluster._nodeId;
+        if (sn.cluster.isLeader()) {
+          newLeaderId = sn.cluster.nodeId;
           break;
         }
       }
@@ -116,7 +116,7 @@ test("Cluster Resilience - Network partition, leader failover, fencing, and catc
     await newLeader.set("during_partition", "value_2", { ack: "quorum" });
     await setTimeout(100);
 
-    const survivingOther = survivingNodes.find((n) => n._cluster._nodeId !== newLeaderId);
+    const survivingOther = survivingNodes.find((n) => n.cluster.nodeId !== newLeaderId);
     assert.equal(await newLeader.get("during_partition"), "value_2");
     assert.equal(await survivingOther.get("during_partition"), "value_2");
 
@@ -147,9 +147,9 @@ test("Cluster Resilience - Network partition, leader failover, fencing, and catc
 
     // 10. Perform another write to verify healthy cluster operation after heal
     const currentLeaderId =
-      (await node1._cluster.waitForLeader(1000)) ||
-      (await node2._cluster.waitForLeader(1000)) ||
-      (await node3._cluster.waitForLeader(1000));
+      (await node1.cluster.waitForLeader(1000)) ||
+      (await node2.cluster.waitForLeader(1000)) ||
+      (await node3.cluster.waitForLeader(1000));
     const currentLeader = nodes.get(currentLeaderId);
     await currentLeader.set("post_heal_key", "value_3", { ack: "quorum" });
     await setTimeout(100);
@@ -169,7 +169,7 @@ test("Cluster Resilience - Network partition, leader failover, fencing, and catc
     // 12. Invariant assertions across all nodes
     for (const n of [node1, node2, node3]) {
       const report = await verifyInvariants(n);
-      assert.equal(report.valid, true, `Node ${n._cluster._nodeId} invariants must be fully valid`);
+      assert.equal(report.valid, true, `Node ${n.cluster.nodeId} invariants must be fully valid`);
     }
   } finally {
     await node1.close();

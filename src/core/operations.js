@@ -4,6 +4,8 @@
  */
 
 import { BinaryCodec } from "./binary-codec.js";
+import { LIMITS } from "./limits.js";
+import { KeyTooLargeError, ValueTooLargeError } from "../errors.js";
 
 export const OP_SET = 0x01;
 export const OP_DEL = 0x02;
@@ -72,11 +74,18 @@ export class Operation {
    */
   encode() {
     const keyBytes = textEncoder.encode(this.key);
+    if (keyBytes.byteLength > LIMITS.BINARY.MAX_KEY_BYTES) {
+      throw new KeyTooLargeError(keyBytes.byteLength, LIMITS.BINARY.MAX_KEY_BYTES);
+    }
+
     const extraBytes = this.extra ? textEncoder.encode(JSON.stringify(this.extra)) : null;
     const valueBytes = this.value !== undefined ? BinaryCodec.encode(this.value) : null;
 
     const extraLen = extraBytes ? extraBytes.byteLength : 0;
     const valueLen = valueBytes ? valueBytes.byteLength : 0;
+    if (valueLen > LIMITS.BINARY.MAX_VALUE_BYTES) {
+      throw new ValueTooLargeError(valueLen, LIMITS.BINARY.MAX_VALUE_BYTES);
+    }
 
     const headerLen = 1 + 2 + 2 + 8 + 8 + 4 + 2 + keyBytes.byteLength + 2 + extraLen + 4 + valueLen;
     const buf = new Uint8Array(headerLen);

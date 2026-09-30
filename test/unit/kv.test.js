@@ -90,18 +90,18 @@ test("Tencere KV - Lifecycle: Sliding TTL and Consume-on-Read", async () => {
   assert.equal(await db.has("code:123"), false);
 
   // Sliding TTL
-  await db.set("session:1", "session_data", { ttl: "80ms", sliding: true });
-  await new Promise((r) => setTimeout(r, 50));
+  await db.set("session:1", "session_data", { ttl: "180ms", sliding: true });
+  await new Promise((r) => setTimeout(r, 80));
 
   // Touch on read extends the expiration
   assert.equal(await db.get("session:1"), "session_data");
 
-  await new Promise((r) => setTimeout(r, 50));
+  await new Promise((r) => setTimeout(r, 80));
   // Key should still be alive because read refreshed it!
   assert.equal(await db.get("session:1"), "session_data");
 
   // Now wait for full expiration without touch
-  await new Promise((r) => setTimeout(r, 100));
+  await new Promise((r) => setTimeout(r, 220));
   assert.equal(await db.get("session:1"), undefined);
 
   await db.close();

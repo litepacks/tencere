@@ -42,6 +42,58 @@ for (let i = SMALL_INT_MIN; i <= SMALL_INT_MAX; i++) {
   SMALL_INT_CACHE[i - SMALL_INT_MIN] = b;
 }
 
+function hasSpecialTypes(val) {
+  if (val === null || typeof val !== "object") {
+    return typeof val === "bigint";
+  }
+  if (ArrayBuffer.isView(val)) {
+    return true;
+  }
+  if (Array.isArray(val)) {
+    for (let i = 0; i < val.length; i++) {
+      const v = val[i];
+      if (v !== null && typeof v === "object") {
+        if (hasSpecialTypes(v)) return true;
+      } else if (typeof v === "bigint") {
+        return true;
+      }
+    }
+    return false;
+  }
+  for (const k in val) {
+    const v = val[k];
+    if (v !== null && typeof v === "object") {
+      if (hasSpecialTypes(v)) return true;
+    } else if (typeof v === "bigint") {
+      return true;
+    }
+  }
+  return false;
+}
+
+function jsonReplacer(_, v) {
+  if (typeof v === "bigint") {
+    return { __tencere_type: "bigint", value: v.toString() };
+  }
+  if (Buffer.isBuffer(v)) {
+    return { __tencere_type: "buffer", value: v.toString("base64") };
+  }
+  if (v instanceof Uint8Array) {
+    return { __tencere_type: "uint8array", value: Buffer.from(v.buffer, v.byteOffset, v.byteLength).toString("base64") };
+  }
+  return v;
+}
+
+function jsonReviver(_, v) {
+  if (v && typeof v === "object") {
+    if (v.__tencere_type === "bigint") return BigInt(v.value);
+    if (v.__tencere_type === "buffer") return Buffer.from(v.value, "base64");
+    if (v.__tencere_type === "uint8array") return new Uint8Array(Buffer.from(v.value, "base64"));
+    if (v.type === "Buffer" && Array.isArray(v.data)) return Buffer.from(v.data);
+  }
+  return v;
+}
+
 export class BinaryCodec {
   /**
    * Encodes a JS value into a binary Buffer with a 1-byte type tag.
@@ -103,18 +155,9 @@ export class BinaryCodec {
       return buf;
     }
     // Complex object or array: serialize as JSON with BigInt, Buffer, and Uint8Array support
-    const jsonStr = JSON.stringify(val, (_, v) => {
-      if (typeof v === "bigint") {
-        return { __tencere_type: "bigint", value: v.toString() };
-      }
-      if (Buffer.isBuffer(v)) {
-        return { __tencere_type: "buffer", value: v.toString("base64") };
-      }
-      if (v instanceof Uint8Array) {
-        return { __tencere_type: "uint8array", value: Buffer.from(v.buffer, v.byteOffset, v.byteLength).toString("base64") };
-      }
-      return v;
-    });
+    const jsonStr = hasSpecialTypes(val)
+      ? JSON.stringify(val, jsonReplacer)
+      : JSON.stringify(val);
     const len = Buffer.byteLength(jsonStr);
     const buf = Buffer.allocUnsafe(1 + len);
     buf[0] = TYPE_JSON;
@@ -151,23 +194,22 @@ export class BinaryCodec {
         return Buffer.from(buf.buffer, buf.byteOffset, buf.byteLength).readDoubleBE(1);
       case TYPE_STRING: {
         if (buf.byteLength <= 1) return "";
-        return Buffer.from(buf.buffer, buf.byteOffset + 1, buf.byteLength - 1).toString("utf8");
+        return Buffer.isBuffer(buf)
+          ? buf.toString("utf8", 1)
+          : Buffer.from(buf.buffer, buf.byteOffset + 1, buf.byteLength - 1).toString("utf8");
       }
       case TYPE_BYTES: {
         if (buf.byteLength <= 1) return new Uint8Array(0);
         return new Uint8Array(buf.buffer, buf.byteOffset + 1, buf.byteLength - 1);
       }
       case TYPE_JSON: {
-        const str = Buffer.from(buf.buffer, buf.byteOffset + 1, buf.byteLength - 1).toString("utf8");
-        return JSON.parse(str, (_, v) => {
-          if (v && typeof v === "object") {
-            if (v.__tencere_type === "bigint") return BigInt(v.value);
-            if (v.__tencere_type === "buffer") return Buffer.from(v.value, "base64");
-            if (v.__tencere_type === "uint8array") return new Uint8Array(Buffer.from(v.value, "base64"));
-            if (v.type === "Buffer" && Array.isArray(v.data)) return Buffer.from(v.data);
-          }
-          return v;
-        });
+        const str = Buffer.isBuffer(buf)
+          ? buf.toString("utf8", 1)
+          : Buffer.from(buf.buffer, buf.byteOffset + 1, buf.byteLength - 1).toString("utf8");
+        if (!str.includes("__tencere_type") && !str.includes('"type":"Buffer"')) {
+          return JSON.parse(str);
+        }
+        return JSON.parse(str, jsonReviver);
       }
       default:
         // Fallback: raw slice

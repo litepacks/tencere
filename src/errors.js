@@ -64,6 +64,20 @@ export class ClusterNotAvailableError extends TencereError {
   }
 }
 
+export class NotLeaderError extends TencereError {
+  constructor(nodeId, leaderId = null, role = "follower", term = 1, leaderAddress = null) {
+    super(
+      `[Cluster Fencing] Node ${nodeId} is not leader (role: ${role}, term: ${term})${leaderAddress ? `. Leader is at ${leaderAddress}` : ""}`,
+      "ERR_NOT_LEADER"
+    );
+    this.nodeId = nodeId;
+    this.leaderId = leaderId;
+    this.role = role;
+    this.term = term;
+    this.leaderAddress = leaderAddress;
+  }
+}
+
 export class ReadOnlyDatabaseError extends TencereError {
   constructor(message = "Cannot perform write mutation on a read-only historical database view or snapshot") {
     super(message, "ERR_READ_ONLY");
@@ -121,6 +135,28 @@ export class TagLimitExceededError extends TimeSeriesError {
 export class SeriesCardinalityExceededError extends TimeSeriesError {
   constructor(message = "Exceeded maximum series cardinality") {
     super(message, "ERR_SERIES_CARDINALITY");
+  }
+}
+
+export class LimitExceededError extends TencereError {
+  constructor(message = "Operation exceeds defined limits", code = "ERR_LIMIT_EXCEEDED") {
+    super(message, code);
+  }
+}
+
+export class KeyTooLargeError extends LimitExceededError {
+  constructor(size, limit = 65535) {
+    super(`Key size (${size} bytes) exceeds maximum allowed limit (${limit} bytes)`, "ERR_KEY_TOO_LARGE");
+    this.size = size;
+    this.limit = limit;
+  }
+}
+
+export class ValueTooLargeError extends LimitExceededError {
+  constructor(size, limit = 4294967295) {
+    super(`Value size (${size} bytes) exceeds maximum allowed limit (${limit} bytes)`, "ERR_VALUE_TOO_LARGE");
+    this.size = size;
+    this.limit = limit;
   }
 }
 

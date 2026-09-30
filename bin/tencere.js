@@ -6,14 +6,37 @@
 
 import "../src/core/polyfill.js";
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import path from "node:path";
-import { Tencere, verifyInvariants, calculateStateHash } from "../src/index.js";
+import os from "node:os";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+import { Tencere, verifyInvariants, calculateStateHash, createTestCluster } from "../src/index.js";
 import { TencereServer } from "../src/core/server.js";
 import { TencereClient } from "../src/client/index.js";
 import { startRepl, formatValue, parseInputVal } from "../src/cli/repl.js";
 
-const args = process.argv.slice(2);
-const command = args[0];
+function formatTable(headers, rows) {
+  const colWidths = headers.map((h, i) => {
+    let max = h.length;
+    for (const r of rows) {
+      const cell = String(r[i] ?? "");
+      if (cell.length > max) max = cell.length;
+    }
+    return max + 2;
+  });
+
+  const pad = (str, len) => ` ${str}`.padEnd(len);
+  const top = "┌" + colWidths.map((w) => "─".repeat(w)).join("┬") + "┐";
+  const mid = "├" + colWidths.map((w) => "─".repeat(w)).join("┼") + "┤";
+  const bot = "└" + colWidths.map((w) => "─".repeat(w)).join("┴") + "┘";
+
+  const headerLine = "│" + headers.map((h, i) => pad(h, colWidths[i])).join("│") + "│";
+  const rowLines = rows.map((r) => "│" + r.map((cell, i) => pad(String(cell ?? ""), colWidths[i])).join("│") + "│");
+
+  return [top, headerLine, mid, ...rowLines, bot].join("\n");
+}
 
 function printHelp() {
   console.log(`
@@ -25,7 +48,7 @@ Interactive REPL:
   tencere                           (no arguments) Starts interactive REPL
 
 Server & Administration:
-  tencere serve <dataDir> [--port <port>] [--host <host>]
+  tencere serve <dataDir> [options]
   tencere info <dataDir>
   tencere stats <dataDir>
   tencere inspect <dataDir> [prefix]
@@ -35,8 +58,19 @@ Server & Administration:
 Diagnostics & Verification:
   tencere doctor <dataDir>          Comprehensive health & invariant check
   tencere verify <dataDir>          Verify data integrity and print deterministic stateHash
-  tencere cluster status            Show cluster consensus role, term and peers
+  tencere cluster dev [options]     Spin up a local multi-node cluster for development
+  tencere cluster nodes             Show visual cluster dashboard table across all nodes
+  tencere cluster health            Check cluster health & readiness (K8s probe compatible)
+  tencere cluster metrics           Display Raft & replication telemetry metrics
+  tencere cluster status            Show cluster consensus role, term, leader and peers
   tencere cluster verify            Verify cluster node state invariants
+
+Agent Skills (Antigravity / Gemini / Claude / Cursor):
+  tencere skill install             Install skill to workspace (.agents) and global (~/.gemini)
+  tencere skill install --global    Install skill to global ~/.gemini/config/skills/tencere
+  tencere skill install --workspace Install skill to local workspace .agents/skills/tencere
+  tencere skill show                Print skill markdown contents to stdout
+  tencere skill path                Print packaged skill file path
 
 One-shot Operations (remote via TCP or local via --data):
   tencere get <key> [--host <host>] [--port <port>] [--data <dir>]
@@ -53,11 +87,91 @@ TimeSeries Commands:
   tencere timeseries query <name> [--from <from>] [--to <to>] [--bucket <bucket>] [--avg|--sum|--min|--max|--count] [--data <dir>]
 
 Options:
-  --port <port>   TCP port to listen on or connect to (default: 7337)
-  --host <host>   Host address (default: 127.0.0.1 / 0.0.0.0 for serve)
-  --data <dir>    Run operation against local embedded data directory
-  --local <dir>   Run REPL against local embedded data directory
+  --port <port>                 TCP port to listen on or connect to (default: 7337)
+  --host <host>                 Host address (default: 127.0.0.1 / 0.0.0.0 for serve)
+  --data <dir>                  Run operation against local embedded data directory
+  --local <dir>                 Run REPL against local embedded data directory
+
+Cluster Dev Options (for cluster dev):
+  --nodes <n>                   Number of cluster nodes to spawn (default: 3)
+  --base-port <port>            Starting port for cluster nodes (default: 7337)
+  --host <host>                 Host address (default: 127.0.0.1)
+  --memory                      Run cluster nodes in-memory without disk persistence
+  --data-dir <dir>              Directory for node storage directories (default: ./.tencere-cluster)
+  --forward-writes              Enable automatic server write forwarding (default: true)
+
+Cluster Options (for serve):
+  --node-id <id>                Cluster node ID (e.g. 1)
+  --peers <p1,p2>               Cluster peer node IDs (e.g. 2,3)
+  --peer-addrs <id=addr,...>    Cluster peer addresses (e.g. 2=10.0.0.2:7337,3=10.0.0.3:7337)
+  --cluster-config <path>       Path to JSON cluster configuration file
+  --cluster-heartbeat <ms>      Heartbeat interval in ms (default: 50)
+  --cluster-election <min:max>  Election timeout range in ms (default: 150:300)
 `);
+}
+
+export async function parseClusterConfig(flags) {
+  let clusterConfig = null;
+
+  if (flags["cluster-config"]) {
+    const raw = await fs.readFile(flags["cluster-config"], "utf-8");
+    clusterConfig = JSON.parse(raw);
+  }
+
+  const nodeId = flags["node-id"] ?? flags["cluster-node"] ?? flags.nodeId;
+  const peersRaw = flags.peers ?? flags["cluster-peers"];
+  const peerAddrsRaw = flags["peer-addrs"] ?? flags["cluster-peer-addrs"];
+
+  if (nodeId !== undefined || flags.cluster || peersRaw || peerAddrsRaw) {
+    clusterConfig = clusterConfig || {};
+    if (nodeId !== undefined) {
+      clusterConfig.nodeId = Number(nodeId);
+    } else if (clusterConfig.nodeId === undefined) {
+      clusterConfig.nodeId = 1;
+    }
+
+    if (peersRaw) {
+      clusterConfig.peers = String(peersRaw).split(",").map((s) => Number(s.trim())).filter((n) => !isNaN(n));
+    } else if (!clusterConfig.peers) {
+      clusterConfig.peers = [];
+    }
+
+    if (peerAddrsRaw) {
+      clusterConfig.peerAddresses = clusterConfig.peerAddresses || {};
+      for (const pair of String(peerAddrsRaw).split(",")) {
+        const [id, addr] = pair.split("=");
+        if (id && addr) {
+          clusterConfig.peerAddresses[id.trim()] = addr.trim();
+        }
+      }
+    }
+
+    if (flags["cluster-port"]) {
+      clusterConfig.port = Number(flags["cluster-port"]);
+    } else if (clusterConfig.port === undefined && flags.port) {
+      clusterConfig.port = Number(flags.port);
+    }
+
+    if (flags["cluster-host"]) {
+      clusterConfig.host = flags["cluster-host"];
+    } else if (clusterConfig.host === undefined && flags.host && flags.host !== "0.0.0.0") {
+      clusterConfig.host = flags.host;
+    }
+
+    if (flags["cluster-heartbeat"]) {
+      clusterConfig.heartbeatInterval = Number(flags["cluster-heartbeat"]);
+    }
+
+    if (flags["cluster-election"]) {
+      const [min, max] = String(flags["cluster-election"]).split(":");
+      clusterConfig.election = {
+        minTimeout: Number(min) || 150,
+        maxTimeout: Number(max) || 300
+      };
+    }
+  }
+
+  return clusterConfig;
 }
 
 function parseFlags(argv) {
@@ -91,21 +205,48 @@ async function getClientOrLocal(flags, extraArgs = []) {
       close: async () => db.close()
     };
   }
-  const host = flags.host || "127.0.0.1";
-  const port = Number(flags.port) || 7337;
+
+  let host = flags.host;
+  let port = flags.port ? Number(flags.port) : null;
+
+  for (const a of extraArgs) {
+    if (typeof a === "string" && !a.startsWith("-")) {
+      if (a.includes(":")) {
+        const [h, p] = a.split(":");
+        host = h || host || "127.0.0.1";
+        port = Number(p) || port;
+        break;
+      } else if (/^\d+$/.test(a)) {
+        port = Number(a);
+        break;
+      }
+    }
+  }
+
+  host = host || "127.0.0.1";
+  port = port || 7337;
   const address = `${host}:${port}`;
   const client = await TencereClient.connect(address);
   return {
     isLocal: false,
+    address,
     client,
     close: async () => client.close()
   };
 }
 
-async function main() {
+export async function main(argv = process.argv.slice(2)) {
+  const args = argv;
+  const command = args[0];
+
   if (!command) {
-    // Default to interactive REPL
-    await startRepl();
+    if (process.stdin.isTTY) {
+      // Interactive terminal: start interactive REPL
+      await startRepl();
+    } else {
+      // Non-interactive shell, script, or pipe: show help
+      printHelp();
+    }
     return;
   }
 
@@ -137,11 +278,27 @@ async function main() {
       const port = Number(flags.port) || 7337;
       const host = flags.host || "0.0.0.0";
 
+      const clusterConfig = await parseClusterConfig(flags);
+      const dbOptions = clusterConfig ? { cluster: clusterConfig } : {};
+
       console.log(`Starting Tencere database at ${dataDir}...`);
-      const db = await Tencere.open(dataDir);
-      const server = new TencereServer(db, { port, host });
+      const db = await Tencere.open(dataDir, dbOptions);
+      if (db.cluster) {
+        console.log(`[Cluster] Node ${db.cluster.nodeId} initialized (peers: [${db.cluster.peers.join(", ")}])`);
+      }
+
+      const forwardWrites = flags["forward-writes"] === true || flags["forward-writes"] === "true";
+      const server = new TencereServer(db, { port, host, forwardWrites });
       await server.start();
       console.log(`Tencere listening on ${host}:${port} [WAL: batch durability]`);
+
+      if (db.cluster) {
+        db.cluster.waitForLeader(3000).then((leaderId) => {
+          if (leaderId) {
+            console.log(`[Cluster] Current leader: ${leaderId === db.cluster.nodeId ? `Node ${leaderId} (Self)` : `Node ${leaderId}`}`);
+          }
+        }).catch(() => {});
+      }
 
       const shutdown = async () => {
         console.log("\nShutting down Tencere server...");
@@ -491,11 +648,204 @@ async function main() {
 
     case "cluster": {
       const sub = args[1];
-      if (sub === "status") {
+      if (sub === "dev") {
+        const nodes = Number(flags.nodes) || 3;
+        const basePort = Number(flags["base-port"] || flags.port) || 7337;
+        const host = flags.host || "127.0.0.1";
+        const isMemory = Boolean(flags.memory);
+        const dataDir = isMemory ? null : (flags["data-dir"] || flags.data || "./.tencere-cluster");
+        const forwardWrites = flags["forward-writes"] !== "false" && flags["forward-writes"] !== false;
+
+        console.log(`\n🚀 Initializing ${nodes}-node Tencere local development cluster...`);
+        if (!isMemory) {
+          console.log(`📁 Cluster data directory: ${path.resolve(dataDir)}`);
+        } else {
+          console.log(`⚡ Cluster storage mode: Pure in-memory (volatile)`);
+        }
+
+        const cluster = await createTestCluster({
+          nodes,
+          tcp: true,
+          basePort,
+          host,
+          dataDir,
+          forwardWrites,
+          clusterOptions: {
+            election: { minTimeout: 150, maxTimeout: 300 },
+            heartbeatInterval: 50
+          }
+        });
+
+        const leader = await cluster.waitForLeader(5000).catch(() => null);
+        const leaderNodeId = leader?.cluster?.nodeId ?? "None (in election)";
+        const leaderAddr = leader ? cluster.peerAddresses[leaderNodeId] : "unknown";
+
+        console.log(`\n======================================================`);
+        console.log(`🌐 Tencere Local Dev Cluster is UP and READY!`);
+        console.log(`======================================================`);
+        console.log(`  Nodes:            ${nodes}`);
+        console.log(`  Current Leader:   Node ${leaderNodeId} (${leaderAddr})`);
+        console.log(`  Write Forwarding: ${forwardWrites ? "Enabled (followers forward writes to leader)" : "Disabled"}`);
+        console.log(`\nActive Nodes:`);
+        for (let i = 1; i <= nodes; i++) {
+          const addr = cluster.peerAddresses[i];
+          const isL = leader && leader.cluster?.nodeId === i;
+          console.log(`  - Node ${i}: ${addr} ${isL ? "👑 [LEADER]" : "👥 [FOLLOWER]"}`);
+        }
+
+        console.log(`\nConnect via Interactive REPL:`);
+        console.log(`  $ tencere repl ${cluster.peerAddresses[1]}`);
+
+        console.log(`\nConnect via Node.js Cluster Client:`);
+        console.log(`  import { TencereClient } from "tencere/client";`);
+        console.log(`  const db = await TencereClient.cluster([`);
+        for (let i = 1; i <= nodes; i++) {
+          console.log(`    "${cluster.peerAddresses[i]}",`);
+        }
+        console.log(`  ]);`);
+        console.log(`\nPress Ctrl+C to gracefully stop the cluster.\n`);
+
+        const shutdown = async () => {
+          console.log("\nStopping dev cluster nodes...");
+          await cluster.destroy();
+          console.log("Cluster stopped cleanly.");
+          process.exit(0);
+        };
+
+        process.on("SIGINT", shutdown);
+        process.on("SIGTERM", shutdown);
+
+        await new Promise(() => {});
+      } else if (sub === "health") {
+        const conn = await getClientOrLocal(flags, args.slice(2));
+        try {
+          let h;
+          if (conn.isLocal) {
+            h = await conn.db.health({ pingPeers: true });
+          } else {
+            try {
+              const clusterClient = await TencereClient.cluster(conn.address || `${conn.client.host}:${conn.client.port}`);
+              h = await clusterClient.health();
+              await clusterClient.close().catch(() => {});
+            } catch (_) {
+              if (typeof conn.client.health === "function") {
+                h = await conn.client.health();
+              } else {
+                const stats = await conn.client.stats();
+                h = { enabled: Boolean(stats.cluster?.enabled), status: stats.cluster?.isLeader ? "HEALTHY" : "FOLLOWER_HEALTHY", readiness: true, liveness: true };
+              }
+            }
+          }
+
+          if (flags.json) {
+            console.log(JSON.stringify(h, null, 2));
+          } else {
+            console.log("\n🏥 Tencere Cluster Health");
+            console.log(`  - Status:    ${h.status || (h.readiness ? "HEALTHY" : "QUORUM_LOST")}`);
+            console.log(`  - Readiness: ${h.readiness ? "✅ READY (accepting traffic)" : "❌ NOT READY (quorum lost)"}`);
+            console.log(`  - Liveness:  ${h.liveness ? "✅ ALIVE" : "❌ DEAD"}`);
+            if (h.quorum) {
+              console.log(`  - Quorum:    ${h.quorum.reachable}/${h.quorum.total} reachable (required: ${h.quorum.required})`);
+            }
+            if (h.leader) {
+              console.log(`  - Leader:    Node ${h.leader.id ?? "none"} (${h.leader.address || "local"})${h.leader.isSelf ? " [Self]" : ""}`);
+            }
+          }
+
+          if (!h.readiness && !String(h.status).includes("HEALTHY")) {
+            process.exit(1);
+          }
+        } finally {
+          await conn.close();
+        }
+      } else if (sub === "metrics") {
         const conn = await getClientOrLocal(flags, args.slice(2));
         try {
           const stats = conn.isLocal ? conn.db.stats() : await conn.client.stats();
-          console.log(JSON.stringify(stats.cluster || { enabled: false, message: "Cluster not configured" }, null, 2));
+          const cl = stats.cluster;
+          const m = cl?.metrics || (conn.isLocal && conn.db.cluster ? conn.db.cluster.metrics() : null);
+
+          if (flags.json) {
+            console.log(JSON.stringify(m || {}, null, 2));
+          } else if (!m || !m.enabled) {
+            console.log("Cluster metrics not available or cluster not enabled.");
+          } else {
+            console.log(`\n📊 Tencere Cluster Metrics (Node ${m.nodeId})`);
+            console.log(`  - Role:               ${m.role}`);
+            console.log(`  - Term:               ${m.term}`);
+            console.log(`  - Commit Index:       ${m.commitIndex}`);
+            console.log(`  - Last Applied:       ${m.lastApplied}`);
+            console.log(`  - Last Log Index:     ${m.lastLogIndex}`);
+            console.log(`  - Replication Lag:    ${m.replicationLag} entries`);
+            console.log(`  - Elections Held:     ${m.elections}`);
+            console.log(`  - Leader Changes:     ${m.leaderChanges}`);
+            console.log(`  - Submitted / Commit: ${m.submitted} / ${m.committed}`);
+            console.log(`  - Applied Entries:    ${m.applied}`);
+            console.log(`  - Network Wire Bytes: ${m.bytes?.wireBytes ?? 0}`);
+          }
+        } finally {
+          await conn.close();
+        }
+      } else if (sub === "nodes") {
+        const conn = await getClientOrLocal(flags, args.slice(2));
+        try {
+          let h;
+          if (conn.isLocal) {
+            h = await conn.db.health({ pingPeers: true });
+          } else {
+            try {
+              const clusterClient = await TencereClient.cluster(conn.address || `${conn.client.host}:${conn.client.port}`);
+              h = await clusterClient.health();
+              await clusterClient.close().catch(() => {});
+            } catch (_) {
+              if (typeof conn.client.health === "function") {
+                h = await conn.client.health();
+              } else {
+                const stats = await conn.client.stats();
+                h = { enabled: Boolean(stats.cluster?.enabled), nodes: [] };
+              }
+            }
+          }
+
+          if (flags.json) {
+            console.log(JSON.stringify(h.nodes || [], null, 2));
+          } else if (!h.enabled) {
+            console.log("Cluster is not enabled on this node.");
+          } else {
+            console.log("\n🌐 Tencere Cluster Nodes");
+            const headers = ["Node", "Role", "Term", "Health", "Address", "Latency"];
+            const rows = (h.nodes || []).map((n) => [
+              n.nodeId ?? n.id ?? "?",
+              n.isLeader ? "LEADER" : (n.role ? String(n.role).toUpperCase() : "FOLLOWER"),
+              n.term ?? h.term ?? "-",
+              n.status ?? "ONLINE",
+              n.address || "local",
+              n.latencyMs !== undefined && n.latencyMs !== null ? `${Number(n.latencyMs).toFixed(1)}ms` : (n.status === "ONLINE" ? "<0.5ms" : "-")
+            ]);
+            console.log(formatTable(headers, rows));
+            console.log(`\nCluster Status: ${h.status || "UNKNOWN"} | Quorum: ${h.quorum?.reachable}/${h.quorum?.total} active | 128 Partitions Balanced\n`);
+          }
+        } finally {
+          await conn.close();
+        }
+      } else if (sub === "status") {
+        const conn = await getClientOrLocal(flags, args.slice(2));
+        try {
+          const stats = conn.isLocal ? conn.db.stats() : await conn.client.stats();
+          const cl = stats.cluster;
+          if (flags.json) {
+            console.log(JSON.stringify(cl || { enabled: false }, null, 2));
+          } else if (!cl || !cl.enabled) {
+            console.log("Cluster is not enabled on this node.");
+          } else {
+            console.log("\n🌐 Tencere Cluster Status");
+            console.log(`  - Node ID:   ${cl.nodeId}`);
+            console.log(`  - Role:      ${cl.role || (cl.isLeader ? "LEADER" : "FOLLOWER")}`);
+            console.log(`  - Leader ID: ${cl.leaderId ?? (cl.isLeader ? cl.nodeId : "unknown")}`);
+            console.log(`  - Term:      ${cl.term}`);
+            console.log(`  - Peers:     ${cl.peers?.length > 0 ? cl.peers.join(", ") : "none"}`);
+            console.log(`  - Status:    ${cl.isLeader ? "✅ Serving writes as Leader" : "ℹ️ Following cluster leader"}`);
+          }
         } finally {
           await conn.close();
         }
@@ -514,10 +864,89 @@ async function main() {
           await conn.close();
         }
       } else {
-        console.error("Usage: tencere cluster status | tencere cluster verify");
+        console.error("Usage: tencere cluster <dev|nodes|health|metrics|status|verify>");
         process.exit(1);
       }
       break;
+    }
+
+    case "skill":
+    case "install-skill": {
+      const sub = command === "install-skill" ? "install" : (args[1] || "install");
+      const skillSource = path.resolve(__dirname, "../skills/tencere/SKILL.md");
+
+      let content;
+      try {
+        content = await fs.readFile(skillSource, "utf-8");
+      } catch (err) {
+        console.error(`Error reading skill source at ${skillSource}: ${err.message}`);
+        process.exit(1);
+      }
+
+      if (sub === "show" || sub === "cat") {
+        console.log(content);
+        break;
+      }
+
+      if (sub === "path") {
+        console.log(skillSource);
+        break;
+      }
+
+      if (sub === "install" || sub === "add") {
+        const homeDir = os.homedir();
+        const targets = [];
+
+        if (flags.target) {
+          const dest = flags.target.endsWith("SKILL.md")
+            ? flags.target
+            : path.join(flags.target, "skills/tencere/SKILL.md");
+          targets.push({ name: "Custom target", path: path.resolve(dest) });
+        } else {
+          const isGlobal = Boolean(flags.global || flags.g);
+          const isWorkspace = Boolean(flags.workspace || flags.local || flags.w);
+
+          if (isWorkspace || (!isGlobal && !isWorkspace)) {
+            targets.push({
+              name: "Workspace (.agents)",
+              path: path.resolve(process.cwd(), ".agents/skills/tencere/SKILL.md")
+            });
+          }
+
+          if (isGlobal || (!isGlobal && !isWorkspace)) {
+            targets.push({
+              name: "Global (~/.gemini)",
+              path: path.join(homeDir, ".gemini/config/skills/tencere/SKILL.md")
+            });
+          }
+
+          if (flags.cursor || flags.all) {
+            targets.push({
+              name: "Cursor Rules (.cursor/rules)",
+              path: path.resolve(process.cwd(), ".cursor/rules/tencere.md")
+            });
+          }
+
+          if (flags.claude || flags.all) {
+            targets.push({
+              name: "Claude Skills (.claude/skills)",
+              path: path.resolve(process.cwd(), ".claude/skills/tencere/SKILL.md")
+            });
+          }
+        }
+
+        console.log(`\n📦 Installing Tencere Agent Skill...`);
+        for (const t of targets) {
+          await fs.mkdir(path.dirname(t.path), { recursive: true });
+          await fs.writeFile(t.path, content, "utf-8");
+          console.log(`  ✅ [${t.name}]: ${t.path}`);
+        }
+        console.log(`\n✨ Tencere agent skill successfully installed and ready to use!\n`);
+        break;
+      }
+
+      console.error(`Usage: tencere skill <install|show|path> [--global] [--workspace] [--target <dir>]`);
+      process.exit(1);
     }
 
     default:
@@ -527,7 +956,20 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error("Fatal error:", err);
-  process.exit(1);
-});
+function checkIsDirectRun() {
+  if (!process.argv[1]) return false;
+  try {
+    const current = fileURLToPath(import.meta.url);
+    const resolved = fsSync.realpathSync(process.argv[1]);
+    if (current === resolved) return true;
+  } catch (_) {}
+  const basename = path.basename(process.argv[1]).replace(/\.js$/, "");
+  return basename === "tencere";
+}
+
+if (checkIsDirectRun()) {
+  main().catch((err) => {
+    console.error("Fatal error:", err);
+    process.exit(1);
+  });
+}

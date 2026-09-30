@@ -1,0 +1,12 @@
+{
+  "knowledgeHits": 0,
+  "knowledgeMisses": 0,
+  "knowledgeReused": 0,
+  "unknownsResolved": 0,
+  "repeatedInvestigationsPrevented": 0,
+  "candidateKnowledgeMerged": 0,
+  "staleKnowledgeDetected": 0,
+  "contradictionsDetected": 0,
+  "knowledgePromoted": 0,
+  "knowledgeSuperseded": 0
+}

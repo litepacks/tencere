@@ -27,13 +27,13 @@ test("Cluster TimeSeries - Replicated ordering, same-timestamp sequence, and inv
 
   try {
     const leaderId =
-      (await node1._cluster.waitForLeader(1500)) ||
-      (await node2._cluster.waitForLeader(1500)) ||
-      (await node3._cluster.waitForLeader(1500));
+      (await node1.cluster.waitForLeader(1500)) ||
+      (await node2.cluster.waitForLeader(1500)) ||
+      (await node3.cluster.waitForLeader(1500));
 
     assert.ok(leaderId, "Cluster leader must be elected");
-    const leader = nodes.find((n) => n._cluster._nodeId === leaderId);
-    const replicas = nodes.filter((n) => n._cluster._nodeId !== leaderId);
+    const leader = nodes.find((n) => n.cluster.nodeId === leaderId);
+    const replicas = nodes.filter((n) => n.cluster.nodeId !== leaderId);
 
     const ts = leader.timeseries("metrics");
 
@@ -54,7 +54,7 @@ test("Cluster TimeSeries - Replicated ordering, same-timestamp sequence, and inv
     for (const replica of replicas) {
       const repTs = replica.timeseries("metrics");
       const repPoints = await repTs.between(baseTs, baseTs + 2000).values();
-      assert.equal(repPoints.length, 5, `Replica ${replica._cluster._nodeId} must have all 5 replicated points`);
+      assert.equal(repPoints.length, 5, `Replica ${replica.cluster.nodeId} must have all 5 replicated points`);
 
       // Verify exact point order and values match
       for (let i = 0; i < leaderPoints.length; i++) {
@@ -67,7 +67,7 @@ test("Cluster TimeSeries - Replicated ordering, same-timestamp sequence, and inv
     // 3. Verify monotonic (timestamp, sequence) invariants across all nodes
     for (const n of nodes) {
       const report = await verifyInvariants(n);
-      assert.equal(report.valid, true, `Node ${n._cluster._nodeId} invariants must hold`);
+      assert.equal(report.valid, true, `Node ${n.cluster.nodeId} invariants must hold`);
       assert.equal(report.stats.timeSeriesPoints, 5);
     }
 

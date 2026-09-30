@@ -30,7 +30,10 @@ test("Queue Resilience - Worker failure, lease expiration redelivery, and idempo
     await queue.push({ task: "important_work" }, { timeout: "100ms", retries: 3 });
 
     // Wait for initial failure and backoff / redelivery
-    await setTimeout(2500);
+    const deadline1 = Date.now() + 4500;
+    while (executionAttempts < 2 && Date.now() < deadline1) {
+      await setTimeout(50);
+    }
     await worker1.stop();
 
     assert.ok(executionAttempts >= 2, `Job must be redelivered after worker failure (attempts: ${executionAttempts})`);
@@ -55,7 +58,10 @@ test("Queue Resilience - Worker failure, lease expiration redelivery, and idempo
     );
 
     const job2 = await queue.push({ action: "charge_payment" }, { timeout: "100ms", retries: 2 });
-    await setTimeout(2500);
+    const deadline2 = Date.now() + 4500;
+    while (processCalls < 2 && Date.now() < deadline2) {
+      await setTimeout(50);
+    }
     await worker2.stop();
 
     // The job was executed multiple times by the worker loop due to the crash

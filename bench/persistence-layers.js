@@ -3,9 +3,9 @@
  * Explicitly separates storage and durability guarantees into 5 discrete layers:
  *  - Layer A: Pure in-memory (no WAL)
  *  - Layer B: Persistent state without forced fsync (async)
- *  - Layer C: Defter WAL async
- *  - Layer D: Defter WAL batch
- *  - Layer E: Defter WAL strict
+ *  - Layer C: Daktilo WAL async
+ *  - Layer D: Daktilo WAL batch
+ *  - Layer E: Daktilo WAL strict
  *
  * Tracks latency percentiles (p50, p95, p99), write amplification, and RSS.
  */
@@ -66,7 +66,7 @@ export async function runPersistenceBenchmark(options = {}) {
   const layers = [
     { name: "Layer A: In-Memory (No WAL)", dir: null, durability: null },
     { name: "Layer B: Persistent (Async WAL)", dir: "async", durability: "async" },
-    { name: "Layer C: Defter (Batch WAL)", dir: "batch", durability: "batch" }
+    { name: "Layer C: Daktilo (Batch WAL)", dir: "batch", durability: "batch" }
   ];
 
   const results = [];

@@ -3,8 +3,9 @@
  */
 
 import { parseDuration } from "../core/expiry-wheel.js";
+import { LIMITS } from "../core/limits.js";
 
-const MAX_TIMEOUT_MS = 2147483647; // 2^31 - 1 (~24.85 days) Node.js setTimeout limit
+const MAX_TIMEOUT_MS = LIMITS.COORDINATION.MAX_TIMEOUT_MS;
 
 /**
  * Segmented setTimeout that safely handles delays > 2^31 - 1 ms

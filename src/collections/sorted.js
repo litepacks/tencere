@@ -179,7 +179,7 @@ export class SortedCollection {
    * @returns {Promise<number>} new score
    */
   async incr(member, delta = 1) {
-    const cur = this._index.score(member) || 0;
+    const cur = (await this.score(member)) || 0;
     const next = cur + delta;
     this._index.insert(next, member);
     await this._engine.set(this._sKey(member), next);

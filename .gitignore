@@ -3,8 +3,12 @@ node_modules/
 
 # Local database directories & WAL storage
 data/
+.tencere/
+.tencere-cluster/
+raft/
 *.dft
 *.wal
+*.bin
 
 # OS & Editor
 .DS_Store

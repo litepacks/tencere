@@ -41,6 +41,13 @@ Tencere   ──► database semantics + developer API
   - Periodic & timestamp task scheduling with lease fencing (`db.schedule()`)
   - Reactive change streams without polling (`db.watch()`)
   - Event-driven condition predicates (`db.waitFor()`)
+- **Distributed Clustering & Raft Consensus**:
+  - Embedded multi-node Raft consensus powered by Raptiye
+  - Leader election, terms, and heartbeat monitoring
+  - Strict leader fencing protection against split-brain writes
+  - Flexible write ack policies (`quorum`, `all`, `local`)
+  - 128 FNV-1a hash partitions with automated cluster rebalancing
+  - Both production `TCPTransport` and testing `MemoryNetwork` support
 - **History, Time Travel & Rollback** (Opt-in Canonical Architecture):
   - Forward-only canonical mutation stream (`OP_RESTORE`) preserving full auditability without log truncation
   - Time travel with read-only historical database views: `const past = db.at("1h ago")`
@@ -214,7 +221,186 @@ console.log(views.value()); // 1
 db.close();
 ```
 
-### 5. CLI & Interactive REPL
+### 5. Multi-Node Cluster & Raft Replication
+
+Tencere embeds Raptiye to provide high-performance, fault-tolerant Raft consensus and state replication across multiple nodes.
+
+- **Automatic Leader Election & Heartbeats**: Dynamically elects a cluster leader; followers deterministically replicate all state transitions.
+- **Leader Fencing Protection**: Mutation operations are rejected on non-leaders (`[Cluster Fencing] Node X is not leader`), guaranteeing serializable state without split-brain anomalies.
+- **Configurable Ack Policies**: Mutations can wait for consensus (`ack: "quorum"` - default, `ack: "all"`, or `ack: "local"`).
+- **Transport Flexibility**: Built-in production `TCPTransport` over network sockets, and `MemoryNetwork` for in-process testing.
+- **Consistent Partition Routing**: 128 FNV-1a hash partitions distributed across cluster peers.
+
+#### Multi-Node Cluster Setup (TCP)
+
+```js
+import { Tencere } from "tencere";
+
+// Node 1 (on host 10.0.0.1:7337)
+const node1 = await Tencere.open("./data-node1", {
+  cluster: {
+    nodeId: 1,
+    peers: [2, 3],
+    port: 7337,
+    host: "10.0.0.1",
+    peerAddresses: {
+      2: "10.0.0.2:7337",
+      3: "10.0.0.3:7337"
+    },
+    election: { minTimeout: 150, maxTimeout: 300 },
+    heartbeatInterval: 50
+  }
+});
+
+// Await leader election
+const leaderId = await node1.cluster.waitForLeader();
+console.log("Current cluster leader:", leaderId);
+
+// Check cluster status
+console.log(node1.cluster.status());
+// Output: { enabled: true, nodeId: 1, term: 1, isLeader: true, role: 'LEADER', peers: [2, 3] }
+
+// Writes automatically replicate across quorum:
+await node1.set("app:config:theme", "dark", { ack: "quorum" });
+
+await node1.close();
+```
+
+#### In-Memory Cluster (Testing & Verification)
+
+```js
+import { Tencere } from "tencere";
+import { MemoryNetwork } from "raptiye";
+
+const net = new MemoryNetwork();
+
+const node1 = await Tencere.open({
+  cluster: { nodeId: 1, peers: [2], network: net, election: { minTimeout: 30, maxTimeout: 60 }, heartbeatInterval: 15 }
+});
+const node2 = await Tencere.open({
+  cluster: { nodeId: 2, peers: [1], network: net, election: { minTimeout: 30, maxTimeout: 60 }, heartbeatInterval: 15 }
+});
+
+const leaderId = (await node1.cluster.waitForLeader(1000)) || (await node2.cluster.waitForLeader(1000));
+const leader = leaderId === 1 ? node1 : node2;
+const follower = leaderId === 1 ? node2 : node1;
+
+await leader.set("shared:key", "clustered-data");
+// Follower state is synchronized via Raft apply
+console.log(await follower.get("shared:key")); // "clustered-data"
+
+await node1.close();
+await node2.close();
+```
+
+#### Cluster-Aware Remote Client (`TencereClient.cluster`)
+
+Connect to any seed node in the cluster. The client automatically discovers the topology, routes writes to the leader, balances reads according to `readPreference`, and transparently reconnects on leader election/failover:
+
+```js
+import { TencereClient } from "tencere";
+
+// Connect to cluster via one or more seed addresses
+const cluster = await TencereClient.cluster(["10.0.0.1:7337", "10.0.0.2:7337"], {
+  readPreference: "leader", // "leader" (strong consistency) | "follower" (scale reads) | "nearest"
+  maxRetries: 3,
+  retryDelayMs: 100
+});
+
+// Writes are automatically routed to the current cluster leader:
+await cluster.set("users:101", { name: "Alice", plan: "pro" });
+await cluster.increment("stats:pageviews", 1);
+
+// Reads respect readPreference:
+const user = await cluster.get("users:101");
+
+// Cluster pipelining to the leader:
+const results = await cluster.pipeline()
+  .set("batch:1", "data1")
+  .get("batch:1")
+  .exec();
+
+// Clean teardown
+await cluster.close();
+```
+
+#### Smart Follower Redirection & Server-Side Write Forwarding
+
+When write mutations hit a follower node:
+- **Structured Error (`ERR_NOT_LEADER`)**: Followers return `code: "ERR_NOT_LEADER"` alongside `leaderId`, `leaderAddress`, and `term`.
+- **Auto-Redirect Client (`autoRedirect: true`)**: Standalone `TencereClient.connect(address, { autoRedirect: true })` automatically reconnects to the reported `leaderAddress` and retries.
+- **Server-Side Write Forwarding (`forwardWrites: true`)**: Servers started with `--forward-writes` (or `new TencereServer(db, { forwardWrites: true })`) transparently proxy write frames to the leader and return the result.
+
+#### Observability, Health Checks & Telemetry Metrics
+
+Evaluate cluster consensus health, quorum status, and Raft replication telemetry programmatically or via client:
+
+```js
+// Evaluate comprehensive cluster health
+const health = await db.cluster.health({ pingPeers: true });
+console.log(health.status);    // "HEALTHY" | "DEGRADED" | "QUORUM_LOST"
+console.log(health.readiness); // true (accepting traffic) | false (quorum lost)
+console.log(health.quorum);    // { required: 2, reachable: 3, total: 3, hasQuorum: true }
+console.log(health.nodes);     // [{ id: 1, role: "leader", status: "ONLINE", latencyMs: 0.2 }, ...]
+
+// Inspect Raft & replication telemetry metrics
+const metrics = db.cluster.metrics();
+console.log(metrics.commitIndex);    // Raft commit index
+console.log(metrics.lastApplied);    // State machine applied index
+console.log(metrics.replicationLag);  // Entries pending replication
+console.log(metrics.bytes);          // { wireBytes, payloadBytes, ... }
+
+// Client-side cluster health check over TCP:
+const clientHealth = await cluster.health();
+console.log(clientHealth.status);    // "HEALTHY"
+```
+
+#### Instant Test Clusters & Chaos Testing (`createTestCluster`)
+
+For automated integration testing and failure simulation without boilerplate, use `createTestCluster`:
+
+```js
+import { createTestCluster } from "tencere/testing"; // or from "tencere"
+
+// Spin up a 3-node in-memory cluster instantly
+const cluster = await createTestCluster({ nodes: 3 });
+
+// Leader discovery
+const leader = cluster.leader; // or await cluster.waitForLeader()
+console.log("Leader Node ID:", leader.cluster.nodeId);
+console.log("Follower count:", cluster.followers.length);
+
+// Write to leader
+await leader.set("config:feature_flag", true);
+
+// Chaos Testing: Simulate network split / leader isolation
+cluster.isolate(leader);
+
+// Surviving quorum automatically elects a new leader
+const newLeader = await cluster.waitForLeader();
+console.log("Failover new leader:", newLeader.cluster.nodeId);
+
+// Split-brain bipartition testing
+cluster.partition([1], [2, 3]);
+
+// Heal all network partitions
+cluster.heal();
+
+// Node lifecycle: Stop and restart individual nodes
+await cluster.stopNode(2);
+await cluster.startNode(2);
+// or: await cluster.restartNode(2);
+
+// Real TCP Test Cluster with Cluster Client:
+const tcpCluster = await createTestCluster({ nodes: 3, tcp: true, basePort: 8700 });
+const client = await tcpCluster.client();
+await client.set("key", "val");
+
+await cluster.destroy();
+await tcpCluster.destroy();
+```
+
+### 6. CLI & Interactive REPL
 
 ```bash
 # Launch interactive REPL (connects to remote server or runs embedded)
@@ -238,14 +424,34 @@ tencere set counter 42 --ttl 1h
 tencere keys
 tencere ping
 
+# Spin up a local multi-node development cluster with 1 command:
+tencere cluster dev --nodes 3 --base-port 7337 --memory
+# Or backed by persistent node directories:
+tencere cluster dev --nodes 3 --data-dir ./.tencere-cluster
+
+# Start standalone TCP server:
+tencere serve ./data --port 7337
+
+# Start clustered server node via CLI:
+tencere serve ./data-1 --port 7337 --node-id 1 --peers 2,3 --peer-addrs 2=10.0.0.2:7337,3=10.0.0.3:7337
+# Or with configuration file:
+tencere serve ./data-1 --cluster-config cluster.json
+
+# Cluster Observability & Probes (Kubernetes / Docker):
+tencere cluster nodes 10.0.0.1:7337            # ASCII table: Node, Role, Term, Health, Address, Latency
+tencere cluster health 10.0.0.1:7337           # Exit code 0 on healthy/ready, exit code 1 on quorum loss
+tencere cluster health 10.0.0.1:7337 --json    # Structured JSON for monitoring & alerts
+tencere cluster metrics 10.0.0.1:7337          # Raft replication telemetry metrics
+
+# Check cluster consensus and topology:
+tencere cluster status --host 10.0.0.1 --port 7337
+tencere cluster verify ./data-1
+
 # TimeSeries inspection & queries:
 tencere timeseries list ./data
 tencere timeseries info temperature ./data
 tencere timeseries tail temperature ./data --count 10
 tencere timeseries query temperature ./data --from "1h ago" --bucket 1m --avg
-
-# Start standalone TCP server
-tencere serve ./data --port 7337
 
 # Inspect, stats, and safe backups
 tencere inspect ./data [prefix]
@@ -253,6 +459,28 @@ tencere info ./data
 tencere stats ./data
 tencere backup ./data ./backup
 tencere restore ./backup ./restored_data
+```
+
+### 7. Agent Skill (Antigravity, Gemini, Cursor & Claude)
+
+Tencere includes a comprehensive AI agent skill definition ([`skills/tencere/SKILL.md`](file:///Users/ahmet/projects/tencere/skills/tencere/SKILL.md)) covering architectural runbooks, storage engine options, multi-node Raft clustering, coordination primitives, and invariant verifications.
+
+Install it into your workspace or global agent configurations with a single command:
+
+```bash
+# Install to current workspace (.agents/skills/tencere) and global (~/.gemini/config/skills/tencere):
+npx tencere skill install
+
+# Or via npm script:
+npm run skill:install
+
+# Target specific environments:
+tencere skill install --workspace       # Only local workspace .agents/skills/tencere
+tencere skill install --global          # Only global ~/.gemini/config/skills/tencere
+tencere skill install --cursor          # Also install to .cursor/rules/tencere.md
+tencere skill install --claude          # Also install to .claude/skills/tencere/SKILL.md
+tencere skill install --all             # Install across all supported agent environments
+tencere skill show                      # Print skill markdown to stdout
 ```
 
 ---

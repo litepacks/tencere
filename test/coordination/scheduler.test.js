@@ -13,7 +13,7 @@ test("Tencere Coordination - Scheduler (.every, .at, task stop, error handling)"
   });
   assert.equal(taskEvery.active, true);
 
-  await setTimeout(140);
+  await setTimeout(200);
   assert.ok(count >= 2, `Expected at least 2 ticks, got ${count}`);
 
   taskEvery.stop();

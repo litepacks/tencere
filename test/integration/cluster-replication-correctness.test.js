@@ -25,7 +25,7 @@ test("3-Node Raptiye Cluster: Canonical Replication, Quorum Ack, StateHash Parit
 
   try {
     // Wait for Raft election and leader stabilization
-    const leaderId = (await node1._cluster.waitForLeader(1000)) || (await node2._cluster.waitForLeader(1000)) || 1;
+    const leaderId = (await node1.cluster.waitForLeader(1000)) || (await node2.cluster.waitForLeader(1000)) || 1;
     const nodes = { 1: node1, 2: node2, 3: node3 };
     const leaderNode = nodes[leaderId] || node1;
     const replicas = [node1, node2, node3].filter((n) => n !== leaderNode);
